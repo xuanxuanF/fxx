@@ -1,0 +1,389 @@
+clc;
+clear all;
+close all;
+itsmax=10;
+%%  初始化
+
+n_bs= 3; K=10 ;m_bs= 3;
+N_pairs = n_bs * K;% UE与BS的连接对
+n_ue=N_pairs;%24个用户设备
+W_band_down=5*1e6;%频谱带宽
+
+W_band_up=5*1e6;%频谱带宽
+
+p_bs= 0.2;%AP下行传输功率，W
+%N0=9.999999999999965e-17; %sigma的平方
+N0=3e-13;
+p_ue= 0.1;%用户上行传输功率，W
+C_mec= 1*1e6; %mec缓存能力
+O_mec= 1*1e6; %MEC计算能力，周期
+
+
+%D=500;%用户收集到的数据，kb
+%U= 2000;%任务相关的数据，已经存在云服务器里面的相关数据，c代表的含义是，是否已经缓存到mec服务器上
+%W=1000;%完成任务需要的cpu周期
+
+D=500;
+U= 2000;
+W=1000;
+r_mc=1*1e4;%云服务器和mec服务器的传输速率1000bit/s
+
+%计算速率
+f_local=1*1e6;
+f_mec= 10*1e6; 
+f_cloud= 100*1e6;
+
+%% 研究的拓扑
+
+%%%%%%%%%%%%%%%% 确定基站的位置 %%%%%%%%%%%%
+Rcell=500;%每个小区的半径
+BsPosition = Rcell*[0,0;0,-sqrt(3);3/2,-sqrt(3)/2];% position of BSs
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%~~UDS2 begin~~%%%%%%%%%%%%%%%%%%%%
+ r = zeros(n_bs,K);
+ for k=1:K
+ r(:,k) = (k-1+sqrt(rand(n_bs,1)))*Rcell/K*sqrt(3)/2; % random generator the postion of users 
+ end
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%~~UDS2 end~~%%%%%%%%%%%%%%%%%%%%%%
+theta=rand(n_bs,K)*2*pi; % random generator the angle of users
+x_user=zeros(n_bs,K);%for the x position of M*K users
+y_user=zeros(n_bs,K);%for the y position of M*K users
+for i=1:n_bs
+    x_user(i,:)=BsPosition(i,1)+r(i,:).*cos(theta(i,:));
+    y_user(i,:)=BsPosition(i,2)+r(i,:).*sin(theta(i,:));
+end
+
+%calculate the distance between users and BSs
+X_user = repmat(BsPosition(:,1),n_bs,K)- kron(x_user,ones(n_bs,1)); % M*M*K, repmat: replicate matrix repet matrix as the following size
+Y_user = repmat(BsPosition(:,2),n_bs,K)- kron(y_user,ones(n_bs,1)); % M*M*K
+
+X_user = reshape(X_user,n_bs,[]);
+Y_user = reshape(Y_user,n_bs,[]);
+
+BUdistance = sqrt(X_user.^2+Y_user.^2);
+
+%%%%%%%%%%%%%%%%% 建立链路链接 %%%%%%%%%%%%
+BUlink=BUdistance; 
+for m = 1:n_bs
+    BUdistance_cp(m,:)=sort(BUlink(m,:));
+end
+minv=BUdistance_cp(:,1:K);
+for m = 1:n_bs
+    for k = 1:K 
+        [a_1,a_2] = find(BUlink==minv(m,k));  
+        BUlink(a_1,a_2)=1;
+    end
+end
+
+for m = 1:n_bs
+    for n= 1:N_pairs
+        if BUlink(m, n)~=1
+           BUlink(m, n)=0;
+        end
+    end
+end  
+BUlink=BUlink';
+BUdistance=BUdistance';
+
+rayleigh = randn(n_bs,n_ue)+ i*randn(n_bs,n_ue); % Fast fading
+path_loss = -(128.1+37.6.*log10(BUdistance/1000)+normrnd(0,8)); %path loss model; unit of distance_MB/1000 is Km
+path_loss = 10.^(path_loss/10); % Transform dB to scalar
+
+BUlinkGain = path_loss.*abs(rayleigh')/sqrt(2); 
+g_kn=BUlinkGain;
+
+
+%% 上行链路速率
+
+up_inter=zeros(n_ue,n_bs);
+for i_bs=1: n_bs
+      for i_u=1:n_ue
+            it_ue_v = 1:n_ue;
+            it_ue_v(i_u) = []; %删除当前用户
+                   for it_u = 1:(n_ue-1)  % 干扰用户
+                       ue_id=it_ue_v(it_u);
+                       up_inter(i_u,i_bs)=up_inter(i_u,i_bs)+g_kn(ue_id,i_bs)*p_ue;
+                   end        
+      end 
+end
+
+
+R_up=zeros(n_ue,n_bs);
+for i_ue= 1:n_ue
+      for i_bs= 1: n_bs 
+        R_up(i_ue,i_bs)=W_band_up*log(1+g_kn(i_ue, i_bs)*p_ue/( up_inter(i_ue, i_bs)+N0) );
+      end
+end
+save('R_up.mat','R_up');
+   R_up=load('R_up.mat');
+   R_up=R_up.R_up;
+
+R_up_local_1=cat(3, R_up, R_up, R_up);
+
+
+%% 下行链路速率
+
+down_inter=zeros(n_ue,n_bs);
+for i_u=1: n_ue
+      for i_bs=1:n_bs 
+            it_bs_v = 1:n_bs;
+            it_bs_v(i_bs) = []; %eliminate current bs
+                   for it_bs = 1:(n_bs-1)  % interference BS
+                       bs_id=it_bs_v(it_bs);
+                       down_inter(i_u,i_bs)=down_inter(i_u,i_bs)+g_kn(ue_id,i_bs)*p_bs;
+                   end        
+      end 
+end
+
+R_down=zeros(n_ue,n_bs);
+for i_bs= 1: n_bs
+      for i_ue= 1:n_ue 
+        R_down(i_ue,i_bs)=W_band_down*log( 1+g_kn(i_ue, i_bs)*p_bs/( down_inter(i_ue, i_bs)+N0) );
+      end
+end
+save('R_down.mat','R_down');
+  R_down=load('R_down.mat');
+  R_down=R_down.R_down;
+
+R_down_local_1=cat(3, R_down, R_down,R_down);
+
+%% 能量消耗 
+%m_bs=3，n_ue=24，n_bs=3
+%维度1 在每个基站上花费的能耗，
+E_rem=40000;
+
+E_local=1e-20*f_local*f_local*W;
+ 
+E_mec=zeros(i_ue, i_bs, m_bs);
+for m_k=1:m_bs
+    for i_e = 1: n_ue
+        for m_e= 1: n_bs
+            E_mec(i_e, m_e, m_k)= p_ue*[D/R_up_local_1(i_e, m_e, m_k)]; % the transmission energy consumption to MEC
+        end
+    end
+end 
+    
+   
+a_global= ones(n_ue, n_bs);
+b_global= ones(n_ue, n_bs);
+z_global= ones(n_ue, n_bs);
+
+u= zeros(n_ue, n_bs, m_bs);
+v= zeros(n_ue, n_bs, m_bs);
+w= zeros(n_ue, n_bs, m_bs);
+
+%原来是40，我也改成10
+%下面的这个东西就是自适应步长
+rho=0.8;
+T_bp_M=zeros(1, itsmax);
+T_ADMMalgorithm_M= zeros(1, itsmax);         
+% start to iterate and update local variables
+  idx=0;
+      while(idx<itsmax)
+          idx=idx+1;
+          
+          %% 问题求解
+          cvx_begin 
+         % cvx_solver Mosek
+          
+        variable a_local(n_ue,n_bs, m_bs) ;
+        variable b_local(n_ue,n_bs, m_bs) ;
+        variable z_local(n_ue,n_bs, m_bs) ;
+        variable c(n_ue,n_bs) ;
+        
+        expressions t_obj tmp_1 tmp_2
+          
+          t_obj=0;
+           for m_k= 1: m_bs
+               tmp_2=0;
+             for m_o= 1: n_bs
+                  tmp_1=0;
+                  for i_o= 1: n_ue
+                      
+                      tmp_1= U/R_down_local_1(i_o, m_o, m_k)+W/f_local+U/r_mc+ a_local(i_o, m_o, m_k)*(D/R_up_local_1(i_o, m_o, m_k)+ ...
+                          W/f_mec-U/R_down_local_1(i_o, m_o, m_k)-W/f_local)+b_local(i_o, m_o, m_k)*(D/R_up_local_1(i_o, m_o, m_k)+D/r_mc ...
+                          +W/f_cloud-U/R_down_local_1(i_o, m_o, m_k)-W/f_local)-c(i_o, m_o)*(U/r_mc)-z_local(i_o, m_o, m_k)*(U/r_mc);
+                      
+                      tmp_2= (rho/2)*(a_local(i_o, m_o, m_k)-a_global(i_o, m_o)+u(i_o, m_o, m_k))'*(a_local(i_o, m_o, m_k)-a_global(i_o, m_o)+u(i_o, m_o, m_k))+ ...
+                          (rho/2)*(b_local(i_o, m_o, m_k)-b_global(i_o, m_o)+v(i_o, m_o, m_k))'*(b_local(i_o, m_o, m_k)-b_global(i_o, m_o)+v(i_o, m_o, m_k))+ ...
+                          (rho/2)*(z_local(i_o, m_o, m_k)-z_global(i_o, m_o)+w(i_o, m_o, m_k))'*(z_local(i_o, m_o, m_k)-z_global(i_o,m_o)+w(i_o, m_o, m_k));
+                      t_obj=t_obj+tmp_2+ tmp_1;
+                  end
+                  
+              end
+               
+          end
+           
+           minimize t_obj
+           subject to
+         
+          %% constraints
+       
+          % computing ability constraint (1)
+          
+          for m_k= 1:m_bs
+              for i_bs = 1:n_bs
+                  w_cons = 0;
+                  for i_ue = 1:n_ue
+                      w_cons = w_cons + a_local(i_ue, i_bs,m_k)*W;
+                  end
+                  w_cons <= O_mec;  % computation ability constraint (1)
+              end
+          end
+         
+          
+      % offloading decsions constraint (2)  
+     
+          
+      for i_ue = 1:n_ue
+          for m_k= 1:m_bs
+              com_cons=0;
+              for i_bs = 1:n_bs
+                  com_cons = com_cons + a_local(i_ue, i_bs,m_k)+b_local(i_ue, i_bs,m_k);
+              end
+              com_cons <= 1;  % offloading decsions constraints (2)
+          end
+      end
+          
+     % caching storage constraints (3)  
+     
+          
+     for i_bs = 1:n_bs
+         for m_k= 1:m_bs
+             cache_cons = 0;
+             for i_ue = 1:n_ue
+                 cache_cons = cache_cons + a_local(i_ue, i_bs,m_k)*D+c(i_ue, i_bs)*U;
+             end
+             cache_cons <= C_mec;  % storage ability constraint (3)
+         end
+     end
+       
+       % the energy consumpution of local computing (4), (5), (6) E_rem E_local(i_e) E_mec(i_e, m_e)
+       for m_k= 1:m_bs
+           for i_ue = 1:n_ue
+               for i_bs = 1:n_bs
+                   (1-a_local(i_ue, i_bs,m_k)-b_local(i_ue, i_bs,m_k))* E_local+(b_local(i_ue, i_bs, m_k)+a_local(i_ue, i_bs,m_k))*E_mec(i_ue,  i_bs,m_k)<=E_rem;   
+               end
+           end
+       end
+       
+       
+    % the auxiliary variables constraints
+    for m_k= 1:m_bs
+        for i_ue= 1:n_ue
+            for i_bs=1: n_bs
+                z_local(i_ue, i_bs,m_k) <= b_local(i_ue, i_bs,m_k); %constraint (7)
+            end
+        end
+    end
+    
+    
+    for m_k= 1:m_bs
+        for i_ue= 1:n_ue
+            for i_bs=1: n_bs
+                z_local(i_ue, i_bs,m_k) <=  (1-c(i_ue, i_bs)); %constraint (8)
+            end
+        end
+    end
+      
+      
+    for m_k= 1:m_bs
+        for i_ue= 1:n_ue
+            for i_bs=1: n_bs
+                (b_local(i_ue, i_bs,m_k)-c(i_ue, i_bs )) <= z_local(i_ue, i_bs, m_k); %constraint (9)
+            end
+        end
+    end
+     
+    
+    for m_k= 1:m_bs
+        for i_ue= 1:n_ue
+            for i_bs=1: n_bs
+                0 <=  z_local(i_ue, i_bs, m_k) <=1 ;
+                0 <= b_local(i_ue, i_bs, m_k)<=1;
+                0 <= c(i_ue, i_bs)<=1;
+                0 <= a_local(i_ue, i_bs, m_k)<=1;
+            end
+        end
+    end
+ cvx_end   
+ 
+ 
+
+ %% 全局变量更新
+ au_total=u+a_local;
+ bv_total=v+ b_local;
+ zw_total=w+z_local;
+ 
+au_sum=au_total(:, :, 1)+au_total(:, :, 2)+au_total(:, :, 3);
+ bv_sum=bv_total(:, :, 1)+ bv_total(:, :, 2)+ bv_total(:, :, 3);
+ zw_sum=zw_total(:, :, 1)+zw_total(:, :, 2)+zw_total(:, :, 3);
+
+ a_global= (1/n_bs)*au_sum;
+ 
+ b_global= (1/n_bs)*bv_sum;
+  
+   z_global= (1/n_bs)*zw_sum;
+  
+ %% 拉格朗日乘系数更新
+ 
+ u_old=u;
+ 
+ 
+ 
+     for m_k=1: m_bs
+         for i_ue= 1: n_ue
+             for i_bs=1: n_bs
+             u(i_ue, i_bs, m_k)= u_old(i_ue, i_bs, m_k)+ a_local(i_ue, i_bs, m_k)-a_global(i_ue,i_bs);
+         end
+     end
+     end
+ 
+
+ v_old=v;
+     
+  for i_bs=1: n_bs
+     for m_k=1: m_bs
+         for i_ue= 1: n_ue
+             v(i_ue, i_bs, m_k)= v_old(i_ue, i_bs, m_k)+ b_local(i_ue, i_bs, m_k)-b_global(i_ue,i_bs);
+         end
+     end
+  end
+ 
+ w_old=w;
+
+  for i_bs=1: n_bs
+     for m_k=1: m_bs
+         for i_ue= 1: n_ue
+             w(i_ue, i_bs, m_k)= w_old(i_ue, i_bs, m_k)+z_local(i_ue, i_bs, m_k)-z_global(i_ue,i_bs);
+         end
+     end
+ end
+ 
+ 
+ %% 实际时延值
+ T_obj=0;
+ for m_o= 1: n_bs
+     for i_o= 1: n_ue
+         tmp=0;
+         tmp= U/R_down(i_o, m_o)+W/f_local+U/r_mc+ a_global(i_o, m_o)*(D/R_up(i_o, m_o)+ ...
+             W/f_mec-U/R_down(i_o, m_o)-W/f_local)+b_global(i_o, m_o)*(D/R_up(i_o, m_o)+D/r_mc ...
+             +W/f_cloud-U/R_down(i_o, m_o)-W/f_local)-c(i_o, m_o)*(U/r_mc)-b_global(i_o, m_o)*(1-c(i_o, m_o))*(U/r_mc);
+         T_obj=T_obj+tmp;
+     end
+ end
+                 
+  T_ADMMalgorithm_M(1,idx)=T_obj;        
+  
+  T_bp_M(1,idx)=T_obj;
+ end 
+       
+%        plot(1:itsmax,T_bp_M(1,:),'c+-');
+%        hold on;
+ 
+
+save('ADMM.mat','T_bp_M'); %存入当前目录下
+      plot(1:itsmax,T_bp_M(1,:),'r*-');
+      hold on;
+
+ALL_energy = sum(E_mec,'all');
